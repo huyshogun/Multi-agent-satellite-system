@@ -42,15 +42,6 @@ class MAPPOModel(nn.Module):
 
 # Multi-satellite env with downlink and wheel spin
 class MultiSatScheduleEnv:
-    """
-    Multi-satellite scheduling environment with extended actions:
-      actions: 0..n_targets-1 -> image target
-               n_targets     -> idle
-               n_targets+1   -> downlink to ground station
-               n_targets+2   -> spin reaction wheel (temporary FOV boost)
-
-    Observations: per-agent local vector = [pos/1e7, vel/1e3, (cosang,range)*n_targets, wheel_boost_norm]
-    """
     def __init__(self,
                  n_agents: int = 3,
                  n_targets: int = 4,

@@ -41,11 +41,6 @@ def categorical_sample(logits: torch.Tensor):
 
 # Basilisk environment wrapper
 class BasiliskScheduleEnv:
-    """
-    action: 0..n_targets-1 choose target, n_targets = idle
-    state: [pos(3)/1e7, vel(3)/1e3, (cosang, range) * n_targets]
-    reward: seconds observed in decision interval (float)
-    """
     def __init__(self,
                  n_targets: int = 4,
                  decision_dt: float = 10.0,
