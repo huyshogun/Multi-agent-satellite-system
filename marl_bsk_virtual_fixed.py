@@ -58,7 +58,7 @@ class RadarSat(sats.ImagingSatellite):
             sat_args["imageTargetMinimumElevation"] = extra_elev
         return sat_args
 
-# --- TẠO VỆ TINH ---
+# TẠO VỆ TINH 
 def build_heterogeneous_satellites():
     sats_list = []
 
@@ -95,7 +95,7 @@ def build_heterogeneous_satellites():
 
     return sats_list
 '''
-# --- 3. TẠO MÔI TRƯỜNG ---
+# 3. TẠO MÔI TRƯỜNG 
 def make_env(satellites):
     
     scenario = scene.UniformTargets(n_targets=50) 
@@ -119,7 +119,7 @@ def make_env(satellites):
     )
     return env
 '''
-# --- 3. TẠO MÔI TRƯỜNG ---
+# 3. TẠO MÔI TRƯỜNG 
 def make_env(satellites):
     scenario = scene.UniformTargets(n_targets=50) 
     
@@ -140,7 +140,7 @@ def make_env(satellites):
         render_mode="human" 
     )
     return env
-# --- 4. TEST ---
+# 4. TEST 
 def test_env():
     print("1. Khởi tạo vệ tinh...")
     sats = build_heterogeneous_satellites()
