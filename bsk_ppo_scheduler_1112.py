@@ -1,17 +1,3 @@
-# bsk_ppo_scheduler_full.py
-"""
-Basilisk + PPO scheduler (complete file)
-- Features:
-  * Basilisk-backed environment wrapper (single sat LEO) or mock fallback
-  * PPO (PyTorch) actor-critic training (GAE, clipping, entropy)
-  * Computes reward = seconds target is inside FOV during decision interval
-  * Fixes: robust array shapes, reduces SWIG memory leak by cleaning GC when rebuilding sim
-- Usage:
-  * pip install torch numpy
-  * If you have Basilisk and Vizard, set USE_BASILISK=True and VIZ=True (run Vizard first)
-  * Run: python bsk_ppo_scheduler_full.py
-"""
-
 import math
 import gc
 import numpy as np
@@ -21,21 +7,15 @@ import torch.optim as optim
 from typing import Tuple
 import time
 
-# ----------------------
-# Try import Basilisk (optional)
-# ----------------------
 BASILISK_AVAILABLE = False
 try:
     from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, orbitalMotion, vizSupport, unitTestSupport
     from Basilisk.simulation import spacecraft
     BASILISK_AVAILABLE = True
 except Exception:
-    # Basilisk not available on this system; use mock mode
     BASILISK_AVAILABLE = False
 
-# ----------------------
 # Actor-Critic (PPO)
-# ----------------------
 class ActorCritic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden=128):
         super().__init__()
@@ -59,9 +39,7 @@ def categorical_sample(logits: torch.Tensor):
     a = dist.sample()
     return a, dist.log_prob(a), dist.entropy()
 
-# ----------------------
-# Basilisk environment wrapper (or mock fallback)
-# ----------------------
+# Basilisk environment wrapper
 class BasiliskScheduleEnv:
     """
     action: 0..n_targets-1 choose target, n_targets = idle
@@ -107,7 +85,6 @@ class BasiliskScheduleEnv:
             self.target_ecef.append(np.array([x, y, z], dtype=np.float64))
 
     def _cleanup_prev_sim(self):
-        # Try to reduce SWIG/Py memory leaks: drop references and GC
         try:
             if hasattr(self, 'vizObj') and self.vizObj is not None:
                 self.vizObj = None
@@ -120,10 +97,8 @@ class BasiliskScheduleEnv:
             gc.collect()
 
     def _build_basilisk_sim(self):
-        # Clean previous
         self._cleanup_prev_sim()
 
-        # Build sim
         self.scSim = SimulationBaseClass.SimBaseClass()
         self.scSim.SetProgressBar(False)
         self.processName = "dynProcess"
@@ -145,7 +120,7 @@ class BasiliskScheduleEnv:
         gravFactory.addBodiesTo(self.scObject)
         self.planet = planet
 
-        # orbit initial conditions (circular-ish)
+        # orbit initial conditions 
         oe = orbitalMotion.ClassicElements()
         oe.a = self.sma
         oe.e = 0.001
@@ -155,11 +130,9 @@ class BasiliskScheduleEnv:
         oe.f = 0.0
         mu = planet.mu
         rN, vN = orbitalMotion.elem2rv(mu, oe)
-        # ensure shapes are 1D numpy
         self.scObject.hub.r_CN_NInit = np.array(rN, dtype=np.float64).reshape(3,)
         self.scObject.hub.v_CN_NInit = np.array(vN, dtype=np.float64).reshape(3,)
 
-        # recorder
         self.dataRec = self.scObject.scStateOutMsg.recorder(self.sim_step_ns)
         self.scSim.AddModelToTask(self.taskName, self.dataRec)
 
@@ -179,9 +152,7 @@ class BasiliskScheduleEnv:
 
     def reset(self):
         if self.use_basilisk:
-            # Rebuild sim once (clean) to reset
             self._build_basilisk_sim()
-            # initial state from hub init
             pos = np.array(self.scObject.hub.r_CN_NInit, dtype=np.float64).reshape(3,)
             vel = np.array(self.scObject.hub.v_CN_NInit, dtype=np.float64).reshape(3,)
         else:
@@ -191,7 +162,6 @@ class BasiliskScheduleEnv:
         return state
 
     def _build_state_vector(self, pos: np.ndarray, vel: np.ndarray):
-        # robust shaping: accept (N,3) or (3,) arrays
         pos = np.asarray(pos, dtype=np.float64)
         vel = np.asarray(vel, dtype=np.float64)
 
@@ -255,14 +225,12 @@ class BasiliskScheduleEnv:
 
         if self.use_basilisk:
             next_stop = self._sim_time + self.decision_dt
-            # Basilisk expects absolute ns stop time
             self.scSim.ConfigureStopTime(macros.sec2nano(next_stop))
             self.scSim.ExecuteSimulation()
             self._sim_time = next_stop
 
             pos_samples, vel_samples, t_samples = self._get_new_rec_samples()
             if pos_samples.shape[0] == 0:
-                # no samples: use last init
                 last_pos = np.array(self.scObject.hub.r_CN_NInit).reshape(3,)
                 last_vel = np.array(self.scObject.hub.v_CN_NInit).reshape(3,)
                 reward = 0.0 if action < 0 or action >= self.n_targets else 0.0
@@ -272,7 +240,6 @@ class BasiliskScheduleEnv:
                 if 0 <= action < self.n_targets:
                     tgt = self.target_ecef[action]
                     visible_count = 0
-                    # sample-based check
                     for p in pos_samples:
                         p = np.asarray(p, dtype=np.float64).reshape(3,)
                         boresight = -p
@@ -286,7 +253,6 @@ class BasiliskScheduleEnv:
                 else:
                     reward = -0.1 * self.decision_dt
         else:
-            # mock propagation by rotation around z
             mu = 398600.4418e9
             n = math.sqrt(mu / (self.sma**3))
             theta = n * self.decision_dt
@@ -329,9 +295,7 @@ class BasiliskScheduleEnv:
     def state_dim(self):
         return 6 + self.n_targets * 2
 
-# ----------------------
 # GAE / PPO utilities
-# ----------------------
 def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_gae = 0.0
@@ -344,9 +308,7 @@ def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     returns = advantages + values[:len(rewards)]
     return advantages, returns
 
-# ----------------------
 # PPO training
-# ----------------------
 def train_ppo(env,
               epochs=200,
               batch_steps=2048,
@@ -444,13 +406,10 @@ def train_ppo(env,
 
     return model, total_rewards
 
-# ----------------------
-# Run example
-# ----------------------
 if __name__ == "__main__":
     # CONFIG
-    USE_BASILISK =True   # set True if you have Basilisk installed
-    VIZ = False           # set True to attempt Vizard live stream (requires Basilisk vizInterface)
+    USE_BASILISK =True   
+    VIZ = False           
     N_TARGETS = 100
     DECISION_DT = 10.0
     SAMPLE_DT = 1.0
@@ -468,7 +427,6 @@ if __name__ == "__main__":
     print("Training done. Last 5 avg rewards:", rewards[-5:])
     t2 = time.time()
 
-    # playback one episode (if VIZ enabled you'll see live stream)
     s = env.reset()
     total = 0.0
     for step in range(60):

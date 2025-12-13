@@ -6,10 +6,8 @@ from bsk_rl import act, obs, sats, scene, data
 from bsk_rl.sim import dyn, fsw, world
 from bsk_rl.utils.orbital import random_orbit
 
-# Tắt log rác
 bskLogging.setDefaultLogLevel(bskLogging.BSK_WARNING)
 
-# --- 1. ĐỊNH NGHĨA CLASS (SỬA LỖI MODEL TẠI ĐÂY) ---
 class OpticalSat(sats.ImagingSatellite):
     observation_spec = [
         obs.SatProperties(
@@ -20,13 +18,12 @@ class OpticalSat(sats.ImagingSatellite):
         obs.Time(),
     ]
     action_spec = [
-        act.Image(n_ahead_image=3), # Giảm xuống 3 để tính toán nhanh hơn
+        act.Image(n_ahead_image=3),
         act.Charge(duration=600.0),
     ]
     
-    # --- SỬA LỖI: Dùng model chuẩn hỗ trợ xoay ngắm (Target Pointing) ---
-    dyn_type = dyn.ImagingDynModel      # <--- Đã sửa (bỏ Continuous)
-    fsw_type = fsw.ImagingFSWModel      # <--- Đã sửa (bỏ Continuous)
+    dyn_type = dyn.ImagingDynModel      
+    fsw_type = fsw.ImagingFSWModel      
 
     @classmethod
     def default_sat_args(cls, **kwargs):
@@ -50,9 +47,8 @@ class RadarSat(sats.ImagingSatellite):
         act.Charge(duration=600.0),
     ]
     
-    # --- SỬA LỖI: Dùng model chuẩn ---
-    dyn_type = dyn.ImagingDynModel      # <--- Đã sửa
-    fsw_type = fsw.ImagingFSWModel      # <--- Đã sửa
+    dyn_type = dyn.ImagingDynModel      
+    fsw_type = fsw.ImagingFSWModel      
 
     @classmethod
     def default_sat_args(cls, **kwargs):
@@ -62,7 +58,7 @@ class RadarSat(sats.ImagingSatellite):
             sat_args["imageTargetMinimumElevation"] = extra_elev
         return sat_args
 
-# --- 2. TẠO VỆ TINH ---
+# --- TẠO VỆ TINH ---
 def build_heterogeneous_satellites():
     sats_list = []
 
@@ -101,10 +97,10 @@ def build_heterogeneous_satellites():
 '''
 # --- 3. TẠO MÔI TRƯỜNG ---
 def make_env(satellites):
-    # Scenario: 50 mục tiêu ngẫu nhiên
+    
     scenario = scene.UniformTargets(n_targets=50) 
     
-    # Sử dụng BasicWorldModel để tránh lỗi GroundStation
+    
     world_type = world.BasicWorldModel 
     world_args = {} 
 
@@ -115,7 +111,7 @@ def make_env(satellites):
         rewarder=data.UniqueImageReward(),
         world_type=world_type,
         world_args=world_args,
-        # Giảm thời gian chạy xuống 90 phút (khoảng 1 vòng quỹ đạo) để test nhanh
+        
         time_limit=95.0 * 60.0, 
         terminate_on_time_limit=True,
         log_level="INFO",
@@ -123,12 +119,10 @@ def make_env(satellites):
     )
     return env
 '''
-# --- 3. TẠO MÔI TRƯỜNG (SỬA ĐỂ BẬT VIZARD) ---
+# --- 3. TẠO MÔI TRƯỜNG ---
 def make_env(satellites):
-    # Scenario: 50 mục tiêu
     scenario = scene.UniformTargets(n_targets=50) 
     
-    # Dùng BasicWorldModel (Không có trạm mặt đất)
     world_type = world.BasicWorldModel 
     world_args = {} 
 
@@ -143,8 +137,6 @@ def make_env(satellites):
         terminate_on_time_limit=True,
         log_level="INFO",
         disable_env_checker=True,
-        
-        # --- THÊM DÒNG NÀY ĐỂ BẬT VIZARD ---
         render_mode="human" 
     )
     return env
@@ -159,7 +151,7 @@ def test_env():
     try:
         print("3. Reset môi trường...")
         obs, info = env.reset(seed=42)
-        print(">>> RESET THÀNH CÔNG!")
+        print("RESET THÀNH CÔNG!")
         
         done = False
         total_reward = 0.0
@@ -187,7 +179,7 @@ def test_env():
             if step % 10 == 0:
                 print(f"Step {step}: Reward tích lũy = {total_reward:.4f}")
             
-        print(f">>> TEST HOÀN TẤT. Tổng reward: {total_reward}")
+        print(f"TEST HOÀN TẤT. Tổng reward: {total_reward}")
 
     except Exception as e:
         print("\nLỖI:")

@@ -1,18 +1,3 @@
-"""
-bsk_mappo_3sat_basilisk.py
-
-Extended MAPPO multi-satellite example with fixes:
- - Detach tensors before converting to numpy to avoid "requires_grad" runtime error
- - More aggressive Basilisk cleanup to reduce SWIG "memory leak" messages (best-effort)
- - Ensures env cleanup is called on normal exit of training/playback
-
-Notes:
- - Basilisk must be installed for Basilisk mode to actually run. If Basilisk
-   is unavailable the code will still run in a mock physics mode but will not
-   exercise real Basilisk multi-spacecraft dynamics.
-
-"""
-
 import math
 import gc
 import numpy as np
@@ -21,7 +6,6 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import Tuple, List
 
-# Try import Basilisk (optional)
 BASILISK_AVAILABLE = False
 try:
     from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, orbitalMotion, vizSupport
@@ -30,9 +14,7 @@ try:
 except Exception:
     BASILISK_AVAILABLE = False
 
-# ----------------------
 # MAPPO model (shared actor + centralized critic)
-# ----------------------
 class MAPPOModel(nn.Module):
     def __init__(self, local_state_dim: int, action_dim: int, n_agents: int, hidden=128):
         super().__init__()
@@ -58,9 +40,7 @@ class MAPPOModel(nn.Module):
     def forward_critic(self, global_obs: torch.Tensor):
         return self.critic(global_obs)
 
-# ----------------------
 # Multi-satellite env with downlink and wheel spin
-# ----------------------
 class MultiSatScheduleEnv:
     """
     Multi-satellite scheduling environment with extended actions:
@@ -127,7 +107,6 @@ class MultiSatScheduleEnv:
             self.target_ecef.append(np.array([x, y, z], dtype=np.float64))
 
     def _build_ground_station(self):
-        # place a single ground station (can extend to many). Use lat=0,lon=0 by default
         gs_lat = 0.0 * math.pi/180.0
         gs_lon = 0.0 * math.pi/180.0
         x = self.earth_radius * math.cos(gs_lat) * math.cos(gs_lon)
@@ -155,10 +134,7 @@ class MultiSatScheduleEnv:
         self.wheel_boost = np.zeros(self.n_agents, dtype=np.float32)  # seconds remaining
 
     def _cleanup_prev_sim(self):
-        # Best-effort cleanup to reduce SWIG reported leaks. We cannot fix C++ side
-        # destructors here, but removing Python references and running GC helps.
         try:
-            # delete common attributes that hold SWIG objects
             for name in ['vizObjs', 'scSim', 'sc_objects', 'dataRec', 'vizObj', 'scObject', 'dataRec']:
                 if hasattr(self, name):
                     try:
@@ -171,7 +147,6 @@ class MultiSatScheduleEnv:
                                 delattr(self, name)
                             except Exception:
                                 pass
-            # also try to remove by direct del in case delattr failed
             for n in ['vizObjs', 'scSim', 'sc_objects', 'dataRec', 'vizObj', 'scObject']:
                 if n in self.__dict__:
                     try:
@@ -242,7 +217,6 @@ class MultiSatScheduleEnv:
                 pos = np.array(sc.hub.r_CN_NInit, dtype=np.float64).reshape(3,)
                 vel = np.array(sc.hub.v_CN_NInit, dtype=np.float64).reshape(3,)
                 states.append(self._build_local_state_vector(pos, vel, self.wheel_boost[i]))
-            # reset buffers
             self.data_buffer = np.zeros(self.n_agents, dtype=np.float32)
             self.wheel_boost = np.zeros(self.n_agents, dtype=np.float32)
             return np.stack(states, axis=0)
@@ -339,7 +313,7 @@ class MultiSatScheduleEnv:
                             visible_count += 1
                     img_seconds = visible_count * self.sample_dt
                     rewards[i] = img_seconds
-                    self.data_buffer[i] += img_seconds * 0.5  # store MB proportional to imaging time
+                    self.data_buffer[i] += img_seconds * 0.5  
                     if img_seconds > 0.0:
                         observed_targets[i] = a
                 elif a == self.n_targets + 1:
@@ -366,11 +340,9 @@ class MultiSatScheduleEnv:
                     # idle
                     rewards[i] = -0.01 * self.decision_dt
 
-                # update next state
                 next_states[i] = self._build_local_state_vector(pos, vel, self.wheel_boost[i])
 
         else:
-            # mock propagation
             mu = 398600.4418e9
             n = math.sqrt(mu / (self.sma**3))
             theta = n * self.decision_dt
@@ -432,7 +404,6 @@ class MultiSatScheduleEnv:
             self._mock_pos = pos_new
             self._mock_vel = vel_new
 
-        # coverage bonus: encourage unique targets covered by team during this decision
         unique_targets = set([t for t in observed_targets if t >= 0])
         team_coverage = len(unique_targets)
         if self.n_targets > 0:
@@ -465,9 +436,7 @@ class MultiSatScheduleEnv:
     def global_state_dim(self):
         return self.local_state_dim() * self.n_agents
 
-# ----------------------
-# GAE unchanged
-# ----------------------
+# GAE 
 
 def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     advantages = np.zeros_like(rewards, dtype=np.float32)
@@ -481,9 +450,7 @@ def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     returns = advantages + values[:len(rewards)]
     return advantages, returns
 
-# ----------------------
-# MAPPO training (adapted to new local_state_dim and action_space)
-# ----------------------
+# MAPPO training 
 def train_mappo(env: MultiSatScheduleEnv,
                 n_agents: int = 3,
                 epochs: int = 200,
@@ -529,7 +496,6 @@ def train_mappo(env: MultiSatScheduleEnv,
                     logits_tensor = model.forward_actor(local_obs_tensor)
                     dist = torch.distributions.Categorical(logits=logits_tensor)
                     acts = dist.sample()
-                    # detach before converting to numpy to avoid "requires_grad" error
                     logps_t = dist.log_prob(acts).detach().cpu().numpy()
 
                     global_obs_tensor = torch.tensor(global_obs.reshape(1, -1), dtype=torch.float32, device=device)
@@ -642,18 +608,13 @@ def train_mappo(env: MultiSatScheduleEnv,
         return model, total_rewards
 
     finally:
-        # ensure Basilisk objects are cleaned up at function exit
         try:
             if hasattr(env, '_cleanup_prev_sim'):
                 env._cleanup_prev_sim()
         except Exception:
             gc.collect()
 
-# ----------------------
-# Run example
-# ----------------------
 if __name__ == "__main__":
-    # ENABLE BASILISK multi-sat by default (set False to force mock)
     USE_BASILISK = True
     VIZ = True
     N_AGENTS = 3
@@ -682,7 +643,6 @@ if __name__ == "__main__":
                                 device=device)
     print("Training done. Last 5 avg rewards:", rewards[-5:])
 
-    # playback with monitoring
     obs = env.reset()
     total = 0.0
     for step in range(60):
@@ -693,7 +653,6 @@ if __name__ == "__main__":
         total += float(np.sum(rewards_step))
         print(f"Step {step:02d} | actions {actions} | rewards {rewards_step} | team_coverage {info.get('team_coverage')} | buffers {info.get('data_buffer')}")
 
-    # final cleanup
     try:
         env._cleanup_prev_sim()
     except Exception:

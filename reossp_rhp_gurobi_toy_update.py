@@ -1,8 +1,3 @@
-# reossp_rhp_gurobi_toy_fixed.py
-# Toy Gurobi implementation of a Rolling-Horizon REOSSP subproblem solver.
-# Author: ChatGPT (adapted to user request)
-# Requirements: gurobipy (Gurobi Python API)
-
 import random
 from collections import defaultdict
 from gurobipy import Model, GRB, quicksum
@@ -37,7 +32,6 @@ def generate_toy_instance(S=6, K=2, P=3, G=1, J_options=3, T_per_stage=4, seed=1
     data["W"] = W
     data["H"] = H
 
-    # data/battery params (toy)
     data["Dobs"] = 5.0
     data["Dcomm"] = 4.0
     data["Bobs"] = 1.0
@@ -49,7 +43,7 @@ def generate_toy_instance(S=6, K=2, P=3, G=1, J_options=3, T_per_stage=4, seed=1
     data["Bmin"] = 0.0
     data["Bmax"] = 1000.0
 
-    # transfer cost (toy)
+
     c = {}
     for s in range(1, S+1):
         for k in data["K"]:
@@ -60,19 +54,15 @@ def generate_toy_instance(S=6, K=2, P=3, G=1, J_options=3, T_per_stage=4, seed=1
     data["c"] = c
     data["c_k_max"] = {k: 2.0 for k in data["K"]}
 
-    # initial states for stage 1
     data["d_init"] = {k: data["Dmin"] for k in data["K"]}
     data["b_init"] = {k: data["Bmax"] for k in data["K"]}
 
-    data["C"] = 2.0  # weight for downlink
+    data["C"] = 2.0  
     return data
 
-# --------------------- Build & solve one RHP(s,L) with Gurobi ---------------------
+
 def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbose=False):
-    """
-    Build and solve the subproblem RHP(s,L) using Gurobi.
-    Returns model and dictionaries of variables for extraction.
-    """
+
     model = Model(f"RHP_s{s}_L{L}")
     model.Params.OutputFlag = 1 if verbose else 0
     if time_limit is not None:
@@ -86,27 +76,26 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
     Dobs = data["Dobs"]
     Dcomm = data["Dcomm"]
 
-    # CORRECT lookahead set: s .. min(s+L-1, S)
     L_end = min(s + L - 1, S)
     Lset = list(range(s, L_end + 1))
     T_s = {ell: data["T_s"][ell] for ell in Lset}
 
-    # VARIABLES
-    x = {}   # x[ell,k,i,j] binary
-    y = {}   # y[ell,k,t,p] binary
-    q = {}   # q[ell,k,t,g] binary
-    h = {}   # h[ell,k,t] binary
-    d = {}   # d[ell,k,t] continuous
-    b = {}   # b[ell,k,t] continuous
+    
+    x = {}   
+    y = {}   
+    q = {}   
+    h = {}   
+    d = {}   
+    b = {}   
 
-    # Create x vars (only for i in prev-stage set; for ell==s prev is singleton J_tilde_prev[k])
+    
     for ell in Lset:
         for k in K_list:
             prev_i_list = [J_tilde_prev[k]] if ell == s else data["J"][(ell-1, k)]
             for i in prev_i_list:
                 for j in data["J"][(ell, k)]:
                     x[(ell, k, i, j)] = model.addVar(vtype=GRB.BINARY, name=f"x_{ell}_{k}_{i}_{j}")
-    # y,q,h,d,b
+    
     for ell in Lset:
         for k in K_list:
             for t in T_s[ell]:
@@ -120,7 +109,6 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
 
     model.update()
 
-    # OBJECTIVE: maximize C*sum q + sum y
     obj_terms = []
     for key, val in q.items():
         obj_terms.append(C * val)
@@ -128,28 +116,21 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
         obj_terms.append(val)
     model.setObjective(quicksum(obj_terms), GRB.MAXIMIZE)
 
-    # CONSTRAINTS
-
-    # 1) continuity at first stage: sum_j x_{s,k,i,j} == 1 for i = J_tilde_prev[k]
     for k in K_list:
         i = J_tilde_prev[k]
         expr = quicksum(x[(s, k, i, j)] for j in data["J"][(s, k)] if (s, k, i, j) in x)
         model.addConstr(expr == 1, name=f"cont_first_{s}_{k}")
-
-    # 2) continuity chain: for ell in Lset\{max}, for each k and i in J_{ell,k}:
+        
     for ell in Lset:
         if ell == max(Lset):
             continue
         for k in K_list:
             for i in data["J"][(ell, k)]:
-                # left: sum_j x_{ell+1,k,i,j}
                 left_terms = [ x[(ell+1, k, i, j)] for j in data["J"][(ell+1, k)] if (ell+1, k, i, j) in x ]
-                # right: sum_{jprev} x_{ell,k,jprev,i}
                 prev_list = [J_tilde_prev[k]] if ell == s else data["J"][(ell-1, k)]
                 right_terms = [ x[(ell, k, jprev, i)] for jprev in prev_list if (ell, k, jprev, i) in x ]
                 model.addConstr(quicksum(left_terms) - quicksum(right_terms) == 0, name=f"cont_chain_{ell}_{k}_{i}")
 
-    # 3) transfer budget: sum c * x <= c_k_max (sum over ell in Lset)
     for k in K_list:
         expr_terms = []
         for (ell_, kk, i, j) in x.keys():
@@ -159,8 +140,6 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
             expr_terms.append(cost * x[(ell_, kk, i, j)])
         model.addConstr(quicksum(expr_terms) <= data["c_k_max"][k], name=f"transfer_budget_{k}")
 
-    # 4) time-window constraints: V*x >= y; W*x >= q; H*x >= h
-    # If no lhs terms, force y or q or h == 0
     for (ell, k, t, p), vary in y.items():
         lhs = []
         prev_list = [J_tilde_prev[k]] if ell == s else data["J"][(ell-1, k)]
@@ -197,14 +176,12 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
         else:
             model.addConstr(quicksum(lhs) >= varh, name=f"vtw_h_{ell}_{k}_{t}")
 
-    # 5) at most one activity per time step: sum_p y + sum_g q + h <= 1
     for ell in Lset:
         for k in K_list:
             for t in T_s[ell]:
                 expr = quicksum(y[(ell, k, t, p)] for p in P_list) + quicksum(q[(ell, k, t, gidx)] for gidx in G_list) + h[(ell, k, t)]
                 model.addConstr(expr <= 1, name=f"at_most_one_{ell}_{k}_{t}")
 
-    # 6) data tracking: d_{ell,k,t+1} = d_{ell,k,t} + Dobs*sum y - Dcomm*sum q (if t < Tend)
     for ell in Lset:
         Tlist = T_s[ell]
         for k in K_list:
@@ -212,7 +189,6 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
                 if t < max(Tlist):
                     model.addConstr(d[(ell, k, t+1)] == d[(ell, k, t)] + Dobs * quicksum(y[(ell, k, t, p)] for p in P_list) - Dcomm * quicksum(q[(ell, k, t, gidx)] for gidx in G_list),
                                     name=f"data_update_{ell}_{k}_{t}")
-    # stage boundary for data: for ell < max(Lset)
     for ell in Lset:
         if ell == max(Lset):
             continue
@@ -221,12 +197,11 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
             model.addConstr(d[(ell+1, k, 1)] == d[(ell, k, Tend)] + Dobs * quicksum(y[(ell, k, Tend, p)] for p in P_list) - Dcomm * quicksum(q[(ell, k, Tend, gidx)] for gidx in G_list),
                             name=f"data_stage_bound_{ell}_{k}")
 
-    # 7) data bounds after action (20e,20f): d + Dobs*sum y <= Dmax ; d - Dcomm*sum q >= Dmin
+
     for (ell, k, t), dv in d.items():
         model.addConstr(dv + Dobs * quicksum(y[(ell, k, t, p)] for p in P_list) <= data["Dmax"], name=f"data_upper_{ell}_{k}_{t}")
         model.addConstr(dv - Dcomm * quicksum(q[(ell, k, t, gidx)] for gidx in G_list) >= data["Dmin"], name=f"data_lower_{ell}_{k}_{t}")
 
-    # 8) battery tracking: b_{ell,k,t+1} = b_{ell,k,t} + Bcharge*h - Bobs*sum y - Bcomm*sum q - Btime (if t < Tend)
     for ell in Lset:
         Tlist = T_s[ell]
         for k in K_list:
@@ -234,7 +209,7 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
                 if t < max(Tlist):
                     model.addConstr(b[(ell, k, t+1)] == b[(ell, k, t)] + data["Bcharge"] * h[(ell, k, t)] - data["Bobs"] * quicksum(y[(ell, k, t, p)] for p in P_list) - data["Bcomm"] * quicksum(q[(ell, k, t, gidx)] for gidx in G_list) - data["Btime"],
                                     name=f"batt_update_{ell}_{k}_{t}")
-    # battery stage boundary
+
     for ell in Lset:
         if ell == max(Lset):
             continue
@@ -243,28 +218,24 @@ def solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=None, verbo
             model.addConstr(b[(ell+1, k, 1)] == b[(ell, k, Tend)] + data["Bcharge"] * h[(ell, k, Tend)] - data["Bobs"] * quicksum(y[(ell, k, Tend, p)] for p in P_list) - data["Bcomm"] * quicksum(q[(ell, k, Tend, gidx)] for gidx in G_list) - data["Btime"],
                             name=f"batt_stage_bound_{ell}_{k}")
 
-    # 9) battery storage limits: b + Bcharge*h <= Bmax ; b - Bobs*sum y - Bcomm*sum q - Btime >= Bmin
     for (ell, k, t), bv in b.items():
         model.addConstr(bv + data["Bcharge"] * h[(ell, k, t)] <= data["Bmax"], name=f"batt_upper_{ell}_{k}_{t}")
         model.addConstr(bv - data["Bobs"] * quicksum(y[(ell, k, t, p)] for p in P_list) - data["Bcomm"] * quicksum(q[(ell, k, t, gidx)] for gidx in G_list) - data["Btime"] >= data["Bmin"],
                         name=f"batt_lower_{ell}_{k}_{t}")
 
-    # 10) initial conditions: d_{s,k,1} == data["d_init"][k], b_{s,k,1} == data["b_init"][k]
     for k in K_list:
         model.addConstr(d[(s, k, 1)] == data["d_init"][k], name=f"init_d_{k}")
         model.addConstr(b[(s, k, 1)] == data["b_init"][k], name=f"init_b_{k}")
 
-    # Optimize
     model.update()
     model.optimize()
 
     return model, x, y, q, h, d, b
 
-# --------------------- Rolling horizon driver using Gurobi ---------------------
 def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
     S = data["S"]
     K_list = data["K"]
-    # initial occupied slot per satellite: choose first in J[(1,k)]
+
     J_tilde_prev = {k: data["J"][(1, k)][0] for k in K_list}
 
     x_tilde = {}
@@ -275,12 +246,11 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
     b_tilde = {}
     z_history = []
 
-    for s in range(1, S - L + 2):  # loop such that s..s+L-1 valid; last s = S-L+1
+    for s in range(1, S - L + 2):  
         if verbose:
             print(f"\n--- Solving RHP(s={s}, L={L}) ---")
         model, xvars, yvars, qvars, hvars, dvars, bvars = solve_rhp_subproblem_gurobi(data, s, L, J_tilde_prev, time_limit=time_limit_per_sub, verbose=verbose)
 
-        # If optimize failed / no feasible solution
         if model.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL):
             if verbose:
                 print("Solver status:", model.Status)
@@ -292,17 +262,13 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
         if verbose:
             print("z_s:", zval)
 
-        # extract first-stage x decisions (ell == s)
         for (ell, k, i, j), var in list(xvars.items()):
             if ell == s:
-                # guard: some solvers may not produce var.X if no solution; check existence
                 val = int(round(var.X)) if hasattr(var, "X") else 0
                 if val == 1:
                     x_tilde[(s, k)] = (i, j)
-                    # update J_tilde_prev for next stage
                     J_tilde_prev[k] = j
 
-        # extract y,q,h for stage s
         for (ell, k, t, p), var in list(yvars.items()):
             if ell == s:
                 if int(round(var.X)) == 1:
@@ -316,7 +282,6 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
                 if int(round(var.X)) == 1:
                     h_tilde.setdefault((s, k), []).append(t)
 
-        # store d,b for stage s
         for (ell, k, t), var in list(dvars.items()):
             if ell == s:
                 d_tilde[(s, k, t)] = var.X
@@ -324,7 +289,6 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
             if ell == s:
                 b_tilde[(s, k, t)] = var.X
 
-        # update d_init and b_init for next stage using Tend
         Tend = max(data["T_s"][s])
         for k in K_list:
             d_Tend = dvars[(s, k, Tend)].X
@@ -335,7 +299,6 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
             h_Tend = int(round(hvars[(s, k, Tend)].X)) if (s, k, Tend) in hvars else 0
             data["b_init"][k] = b_Tend + data["Bcharge"] * h_Tend - data["Bobs"] * y_Tend - data["Bcomm"] * q_Tend - data["Btime"]
 
-            # subtract transfer cost used at stage s for chosen (i,j)
             chosen = x_tilde.get((s, k), None)
             if chosen:
                 i, j = chosen
@@ -352,7 +315,6 @@ def rolling_horizon_gurobi(data, L=1, time_limit_per_sub=30, verbose=False):
         "z_history": z_history
     }
 
-# --------------------- Example run ---------------------
 if __name__ == "__main__":
     inst = generate_toy_instance(S=6, K=2, P=3, G=1, J_options=3, T_per_stage=3, seed=42)
     print("Running rolling horizon (toy) with Gurobi. Ensure gurobipy is installed and licensed.")
