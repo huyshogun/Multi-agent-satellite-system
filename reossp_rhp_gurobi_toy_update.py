@@ -2,7 +2,6 @@ import random
 from collections import defaultdict
 from gurobipy import Model, GRB, quicksum
 
-# --------------------- Toy instance generator ---------------------
 def generate_toy_instance(S=6, K=2, P=3, G=1, J_options=3, T_per_stage=4, seed=1):
     random.seed(seed)
     data = {}
