@@ -365,54 +365,111 @@ class BasiliskFullMissionEnv:
             v_mag = np.linalg.norm(v_curr)
             v_dir = v_curr / (v_mag + 1e-9)
 
-            # --- LOGIC HÀNH ĐỘNG ---
-            
-# ==================================================================
-            # [NEW] PHẦN 1: SHAPING REWARD (THƯỞNG DẪN ĐƯỜNG)
+            # ... (Các phần check rơi rụng, hết pin ở đầu vòng lặp giữ nguyên) ...
+
             # ==================================================================
-            # Tự động thưởng nếu vệ tinh đang hướng camera về mục tiêu gần nhất
+            # [NÂNG CẤP] PHẦN 1: SMART TARGET SELECTION (CHỌN MỤC TIÊU KHÔN NGOAN)
+            # ==================================================================
             
-            # 1.1 Tìm mục tiêu gần nhất chưa chụp
+            # --- BƯỚC A: LẤY THÔNG TIN ĐỒNG ĐỘI (Để tránh tranh giành) ---
+            other_sat_positions = []
+            for k, other_sat in enumerate(self.sats):
+                if k == i: continue
+                try:
+                    msg = other_sat.scStateOutMsg.read()
+                    other_sat_positions.append(np.array(msg.r_BN_N))
+                except: pass
+
+            # Khởi tạo biến lưu mục tiêu tốt nhất
             best_target_idx = -1
-            min_dist_to_tgt = 1e9
-            for t_idx, t_ecef in enumerate(self.targets_ecef):
-                if t_idx in self.global_captured_targets: continue
-                d = np.linalg.norm(t_ecef - r_curr)
-                if d < min_dist_to_tgt:
-                    min_dist_to_tgt = d
-                    best_target_idx = t_idx
+            best_score = -1e9 # Score càng cao càng tốt
             
-            # 1.2 Nếu có mục tiêu trong tầm "Cảm nhận" (3000km)
-            if best_target_idx != -1 and min_dist_to_tgt < 3000e3:
+            # --- BƯỚC B: QUÉT TẤT CẢ MỤC TIÊU ĐỂ CHẤM ĐIỂM (HEURISTIC 2 & 3) ---
+            for t_idx, t_ecef in enumerate(self.targets_ecef):
+                # 1. Bỏ qua nếu đã chụp rồi
+                if t_idx in self.global_captured_targets: continue
+                
+                # 2. Tính khoảng cách
+                rel_vec = t_ecef - r_curr
+                dist = np.linalg.norm(rel_vec)
+                
+                # [TỐI ƯU] Chỉ xét mục tiêu trong tầm 2500km 
+                if dist > 2500e3: continue 
+                
+                # 3. [HEURISTIC 3] TRÁNH ĐỒNG ĐỘI (Load Balancing)
+                # Kiểm tra xem có vệ tinh nào khác gần mục tiêu này hơn mình không?
+                im_closest = True
+                for p_other in other_sat_positions:
+                    dist_other = np.linalg.norm(t_ecef - p_other)
+                    # Nếu đồng đội gần hơn mình đáng kể (>10km), nhường nó
+                    if dist_other < dist - 10000: 
+                        im_closest = False
+                        break
+                if not im_closest: continue # Bỏ qua, tìm mục tiêu khác
+                
+                # 4. Check Ánh sáng (Bắt buộc)
+                tgt_norm = t_ecef / np.linalg.norm(t_ecef)
+                is_day = np.dot(tgt_norm, self.SUN_DIRECTION) > -0.1
+                if not is_day: continue 
+                
+                # 5. [HEURISTIC 2] MINIMUM SLEW TIME (Góc xoay quan trọng hơn khoảng cách)
+                target_dir = rel_vec / (dist + 1e-9)
+                cos_angle = np.dot(state['bore_vec'], target_dir)
+                
+                # SCORE FORMULA: Coi trọng góc xoay (cos) hơn khoảng cách
+                # cos càng gần 1 (thẳng hàng) càng tốt. dist càng nhỏ càng tốt.
+                score = (cos_angle * 10.0) - (dist / 1000e3) 
+                
+                if score > best_score:
+                    best_score = score
+                    best_target_idx = t_idx
+
+            # --- BƯỚC C: [HEURISTIC 1] OPPORTUNISTIC DOWNLINK (Xả hàng ngay) ---
+            # Kiểm tra xem có Trạm mặt đất (GS) nào ngon ăn không
+            should_downlink = False
+            best_gs_vec = None
+            
+            if state['buffer'] > 0: # Chỉ cần có 1 ảnh là cân nhắc gửi luôn
+                for gs_pos in self.gs_ecef:
+                    gs_vec = gs_pos - r_curr
+                    gs_dist = np.linalg.norm(gs_vec)
+                    
+                    # Nếu trạm ở rất gần (< 2500km) -> GHI ĐÈ ƯU TIÊN SỐ 1
+                    if gs_dist < 2500e3:
+                        should_downlink = True
+                        best_gs_vec = gs_vec / gs_dist
+                        break # Tìm thấy 1 trạm là chốt luôn
+
+            # ==================================================================
+            # PHẦN 2: SHAPING REWARD (THƯỞNG DẪN ĐƯỜNG)
+            # ==================================================================
+            
+            # TRƯỜNG HỢP 1: ƯU TIÊN DOWNLINK (Ghi đè mọi thứ nếu thấy trạm)
+            if should_downlink and best_gs_vec is not None:
+                align_gs = np.dot(state['bore_vec'], best_gs_vec)
+                
+                # Thưởng cực mạnh để ép AI quay về trạm
+                if align_gs > 0.8: rewards[i] += 0.5 
+                elif align_gs > 0.0: rewards[i] += 0.1
+                
+                # Nếu AI chọn đúng hành động Downlink lúc này -> Thưởng thêm để reinforce
+                if self.n_targets <= act < self.n_targets + self.n_gs:
+                     rewards[i] += 0.5
+
+            # TRƯỜNG HỢP 2: SĂN MỤC TIÊU (Nếu không có trạm gần)
+            elif best_target_idx != -1:
+                # Vector đến mục tiêu tốt nhất đã chọn
                 tgt_vec = self.targets_ecef[best_target_idx] - r_curr
                 tgt_vec /= np.linalg.norm(tgt_vec)
                 
-                # Tính độ khớp hướng (Alignment)
-                alignment = np.dot(state['bore_vec'], tgt_vec) # 1.0 = Trùng khít
+                align_tgt = np.dot(state['bore_vec'], tgt_vec)
                 
-                # Nếu hướng khá đúng (> 60 độ), thưởng nhẹ liên tục
-                if alignment > 0.5: 
-                    rewards[i] += 0.05 * alignment # Cộng dồn mỗi bước
-
-            # 1.3 Tương tự với Trạm mặt đất (Nếu buffer có ảnh)
-            if state['buffer'] > 0:
-                # Tìm trạm gần nhất
-                min_gs_dist = 1e9
-                best_gs_vec = None
-                for gs_pos in self.gs_ecef:
-                    vec = gs_pos - r_curr
-                    d = np.linalg.norm(vec)
-                    if d < min_gs_dist:
-                        min_gs_dist = d
-                        best_gs_vec = vec / d
-                
-                if min_gs_dist < 4000e3 and best_gs_vec is not None:
-                    align_gs = np.dot(state['bore_vec'], best_gs_vec)
-                    if align_gs > 0.5:
-                        rewards[i] += 0.05 * align_gs
+                # Thưởng dẫn đường để AI giữ camera hướng về mục tiêu
+                if align_tgt > 0.9: rewards[i] += 0.2  # Rất thẳng hàng
+                elif align_tgt > 0.5: rewards[i] += 0.05 # Khá thẳng
 
             # ==================================================================
-            # PHẦN 2: XỬ LÝ HÀNH ĐỘNG (ACTION)
+            # PHẦN 3: XỬ LÝ HÀNH ĐỘNG (ACTION)
             # ==================================================================
 
             # 1. CHARGE
@@ -424,34 +481,15 @@ class BasiliskFullMissionEnv:
                 else:
                     rewards[i] -= 0.1 # Phạt nhẹ sạc lúc tối
 
-            # 2. ORBIT CHANGE (NÂNG CẤP: SMART SWITCHING)
+            # 2. ORBIT CHANGE (SMART SWITCHING - GIỮ NGUYÊN)
             elif act in [self.ACT_ALT_UP, self.ACT_ALT_DOWN] or \
                  (self.ACT_GOTO_INC_START <= act < self.ACT_GOTO_INC_START + self.n_orbit_choices):
                 
-                # --- A. LOGIC CŨ (BUFFER) ---
+                # (Logic Buffer cũ)
                 if state['buffer'] >= self.buffer_max: rewards[i] += 1.0
                 else: rewards[i] -= 0.05 
 
-                # --- B. LOGIC THÔNG MINH: TÍNH TOÁN QUỸ ĐẠO TỐT NHẤT ---
-                # Tìm xem quỹ đạo nào (Inclination) phù hợp nhất với các mục tiêu còn lại
-                # Heuristic: Inclination tối ưu thường xấp xỉ vĩ độ (Latitude) lớn nhất của đám mục tiêu
-                
-                remaining_lats = []
-                for t_idx, t_pos in enumerate(self.targets_ecef):
-                    if t_idx not in self.global_captured_targets:
-                        # Chuyển ECEF sang vĩ độ (đơn giản hóa)
-                        z = t_pos[2]
-                        r = np.linalg.norm(t_pos)
-                        lat = math.degrees(math.asin(z / r))
-                        remaining_lats.append(abs(lat))
-                
-                # Nếu còn mục tiêu, tính vĩ độ trung bình hoặc max của tụi nó
-                if len(remaining_lats) > 0:
-                    avg_target_lat = np.mean(remaining_lats) # Ví dụ: Bão ở vĩ độ 20
-                else:
-                    avg_target_lat = 45.0 # Mặc định
-                
-                # --- C. XỬ LÝ ALTITUDE (ĐỘ CAO) ---
+                # (Logic Altitude)
                 if act in [self.ACT_ALT_UP, self.ACT_ALT_DOWN]:
                     if state['fuel'] >= 1.0: 
                         dv_vec = v_dir if act == self.ACT_ALT_UP else -v_dir
@@ -460,11 +498,10 @@ class BasiliskFullMissionEnv:
                         self.force_msgs[i].write(self.force_payloads[i], current_nano)
                         state['fuel'] -= 0.5 
                         
-                        # [SMART] Nếu đang ở quá cao (>800km) hoặc quá thấp (<400km) mà chỉnh về chuẩn -> Thưởng
                         r_mag = np.linalg.norm(r_curr)
                         alt = r_mag - self.earth_radius
                         if (alt > 700e3 and act == self.ACT_ALT_DOWN) or (alt < 500e3 and act == self.ACT_ALT_UP):
-                            rewards[i] += 2.0 # Thưởng vì biết giữ độ cao chuẩn
+                            rewards[i] += 2.0
                 
                 # --- D. XỬ LÝ INCLINATION (GÓC NGHIÊNG QUỸ ĐẠO - SMART LOGIC) ---
                 elif self.ACT_GOTO_INC_START <= act:
@@ -550,59 +587,52 @@ class BasiliskFullMissionEnv:
                                 if debug_mode: 
                                     print(f"[BAD] Sat {i} Wrong Switch! Mode: {mode_name}, Picked: {target_inc_deg}, Needed: {best_inc_option}")
 
-            # 3. CAPTURE (CHỤP ẢNH - ĐÃ NÂNG CẤP LOGIC)
+            # 3. CAPTURE (CHỤP ẢNH - CHUẨN VẬT LÝ)
             elif 0 <= act < self.n_targets:
                 if state['buffer'] >= self.buffer_max:
-                    rewards[i] -= 1.0 # Phạt đầy bộ nhớ
+                    rewards[i] -= 1.0 
                 elif act in self.global_captured_targets:
-                    rewards[i] -= 0.1 # Phạt nhẹ trùng lặp
+                    rewards[i] -= 0.1 
                 else:
                     tgt_pos = self.targets_ecef[act]
                     req_vec = tgt_pos - r_curr
                     dist = np.linalg.norm(req_vec); req_vec /= (dist + 1e-9)
                     
                     # Check Ánh sáng
-                    sun_dir = self.SUN_DIRECTION
                     tgt_norm = tgt_pos / np.linalg.norm(tgt_pos)
-                    is_daylight = np.dot(tgt_norm, sun_dir) > -0.1
+                    is_daylight = np.dot(tgt_norm, self.SUN_DIRECTION) > -0.1
                     
                     if not is_daylight:
-                        rewards[i] -= 0.1 # Phạt chụp đêm
+                        rewards[i] -= 0.1 
                     else:
                         # Tính góc xoay
                         cos = np.dot(state['bore_vec'], req_vec)
                         angle = math.degrees(math.acos(np.clip(cos, -1.0, 1.0)))
                         max_turn = math.degrees(self.max_slew_rate) * self.decision_dt
                         
-                        # A. ĐÃ HƯỚNG VÀO MỤC TIÊU -> THỬ CHỤP
                         if angle <= max_turn:
                             state['bore_vec'] = req_vec
-                            state['batt'] -= 1.0 # Chụp tốn pin
+                            state['batt'] -= 1.0 
                             
-                            # Tính Off-Nadir
                             nadir_vec = -r_curr / np.linalg.norm(r_curr)
                             off_nadir = math.degrees(math.acos(np.clip(np.dot(req_vec, nadir_vec), -1, 1)))
                             
-                            # [LOGIC MỚI] BỎ PHẠT NẾU TRƯỢT, CHỈ THƯỞNG NẾU TRÚNG
-                            # Điều kiện: < 1500km và < 45 độ
+                            # [CHUẨN VẬT LÝ] 1500km & 45 độ
                             if dist < 1500e3 and off_nadir < 45.0:
                                 self.global_captured_targets.add(act)
                                 state['buffer'] += 1
-                                rewards[i] += 15.0 # Thưởng đậm (+15)
+                                rewards[i] += 35.0 # Thưởng Capture
                                 if debug_mode: print(f"Sat {i} CAPTURE T{act} SUCCESS")
                             else:
-                                # KHÔNG trừ điểm reward ở đây nữa (chỉ mất pin)
-                                pass 
-                                
-                        # B. ĐANG XOAY (Slewing)
+                                pass # Không phạt, chỉ mất pin
                         else:
-                            state['batt'] -= 0.2 # Xoay tốn ít pin
+                            state['batt'] -= 0.2 
                             ratio = max_turn / angle
                             state['bore_vec'] = (1-ratio)*state['bore_vec'] + ratio*req_vec
                             state['bore_vec'] /= np.linalg.norm(state['bore_vec'])
-                            rewards[i] += 0.05 # Thưởng công xoay
+                            rewards[i] += 0.05 
 
-            # 4. DOWNLINK (TRUYỀN TIN - ĐÃ NÂNG CẤP)
+            # 4. DOWNLINK (TRUYỀN TIN - ƯU TIÊN CAO)
             elif self.n_targets <= act < self.n_targets + self.n_gs:
                 gs_idx = act - self.n_targets
                 gs_pos = self.gs_ecef[gs_idx]
@@ -615,27 +645,23 @@ class BasiliskFullMissionEnv:
                 
                 if state['buffer'] >= self.buffer_max: rewards[i] += 0.5
                 
-                # A. ĐÃ HƯỚNG VỀ TRẠM
                 if angle <= max_turn:
                     state['bore_vec'] = req_vec
                     if state['buffer'] > 0:
-                        # Điều kiện Downlink: < 2200km
+                        # [CHUẨN VẬT LÝ] 2200km Success
                         if dist < 2200e3:
                             state['buffer'] -= 1
                             state['batt'] -= 1.0 
-                            rewards[i] += 99.0 # JACKPOT
+                            rewards[i] += 250.0 # [JACKPOT] Thưởng cực lớn để ép phải Downlink
                             if debug_mode: print(f"Sat {i} DOWNLINK SUCCESS")
-                        # Tiếp cận: < 3000km
+                        # Approaching < 3000km
                         elif dist < 3000e3:
                             score = (3000e3 - dist)/(3000e3 - 2200e3)
-                            rewards[i] += score 
+                            rewards[i] += score * 2.0
                         else:
-                            # Xa quá thì thôi, không phạt
                             pass
                     else:
-                         rewards[i] -= 0.2 # Buffer rỗng mà đòi gửi
-                
-                # B. ĐANG XOAY
+                         rewards[i] -= 0.2 
                 else:
                     state['batt'] -= 0.2
                     ratio = max_turn / angle
@@ -643,7 +669,7 @@ class BasiliskFullMissionEnv:
                     state['bore_vec'] /= np.linalg.norm(state['bore_vec'])
                     rewards[i] += 0.05
 
-            # Idle Drain
+            # Idle
             else:
                 state['batt'] -= 0.05
 
@@ -652,7 +678,7 @@ class BasiliskFullMissionEnv:
         self.scSim.ExecuteSimulation()
         self.sim_time = stop_time
         
-        if self.sim_time > 7200: dones = [True] * self.n_sats
+        if self.sim_time > 21600: dones = [True] * self.n_sats
         return self._get_all_obs(), rewards, dones, {}
 
 # --- 4. TRAINER ---
@@ -733,8 +759,8 @@ def train_mission():
             
             # Metrics đếm tạm qua reward (để log)
             for r in rewards:
-                if r >= 15.0: targets_captured_count += 1 
-                if r >= 99.0: data_downlinked_count += 1
+                if r >= 35.0: targets_captured_count += 1 
+                if r >= 250.0: data_downlinked_count += 1
             
             batch_obs.append(obs_list)
             batch_gs.append(global_state_t)
